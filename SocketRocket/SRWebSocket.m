@@ -243,7 +243,7 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
     NSMutableData *_readBuffer;
     NSUInteger _readBufferOffset;
  
-    NSMutableData *_outputBuffer;
+    NSMutableArray *_outputBufferQueue;
     NSUInteger _outputBufferOffset;
 
     uint8_t _currentFrameOpcode;
@@ -353,7 +353,7 @@ static __strong NSData *CRLFCRLF;
     sr_dispatch_retain(_delegateDispatchQueue);
     
     _readBuffer = [[NSMutableData alloc] init];
-    _outputBuffer = [[NSMutableData alloc] init];
+    _outputBufferQueue = [[NSMutableArray alloc] init];
     
     _currentFrameData = [[NSMutableData alloc] init];
 
@@ -710,7 +710,7 @@ static __strong NSData *CRLFCRLF;
     if (_closeWhenFinishedWriting) {
             return;
     }
-    [_outputBuffer appendData:data];
+    [_outputBufferQueue addObject:data];
     [self _pumpWriting];
 }
 - (void)send:(id)data;
@@ -1067,24 +1067,29 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 {
     [self assertOnWorkQueue];
     
-    NSUInteger dataLength = _outputBuffer.length;
-    if (dataLength - _outputBufferOffset > 0 && _outputStream.hasSpaceAvailable) {
-        NSInteger bytesWritten = [_outputStream write:_outputBuffer.bytes + _outputBufferOffset maxLength:dataLength - _outputBufferOffset];
+    while (_outputBufferQueue.count > 0 && _outputStream.hasSpaceAvailable) {
+        NSData* outputBuffer = _outputBufferQueue[0];
+        NSUInteger dataLength = outputBuffer.length;
+        NSInteger bytesWritten = [_outputStream write:outputBuffer.bytes + _outputBufferOffset maxLength:dataLength - _outputBufferOffset];
         if (bytesWritten == -1) {
             [self _failWithError:[NSError errorWithDomain:@"org.lolrus.SocketRocket" code:2145 userInfo:[NSDictionary dictionaryWithObject:@"Error writing to stream" forKey:NSLocalizedDescriptionKey]]];
              return;
         }
         
         _outputBufferOffset += bytesWritten;
+        if (_outputBufferOffset < dataLength) {
+            // Not room enough for all of current buffer, so done writing
+            break;
+        }
         
-        if (_outputBufferOffset > 4096 && _outputBufferOffset > (_outputBuffer.length >> 1)) {
-            _outputBuffer = [[NSMutableData alloc] initWithBytes:(char *)_outputBuffer.bytes + _outputBufferOffset length:_outputBuffer.length - _outputBufferOffset];
+        // Go on to next buffer:
+        [_outputBufferQueue removeObjectAtIndex:0];
             _outputBufferOffset = 0;
         }
     }
     
     if (_closeWhenFinishedWriting && 
-        _outputBuffer.length - _outputBufferOffset == 0 && 
+        _outputBufferQueue.count == 0 &&
         (_inputStream.streamStatus != NSStreamStatusNotOpen &&
          _inputStream.streamStatus != NSStreamStatusClosed) &&
         !_sentClose) {
