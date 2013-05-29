@@ -233,6 +233,7 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
     
     NSOperationQueue *_delegateOperationQueue;
     dispatch_queue_t _delegateDispatchQueue;
+    NSThread* _delegateThread;
     
     dispatch_queue_t _workQueue;
     NSMutableArray *_consumers;
@@ -422,10 +423,20 @@ static __strong NSData *CRLFCRLF;
 {
     if (_delegateOperationQueue) {
         [_delegateOperationQueue addOperationWithBlock:block];
+    } else if (_delegateThread) {
+        [self performSelector: @selector(_performDelegateBlockNow:)
+                     onThread: _delegateThread
+                   withObject: block
+                waitUntilDone: NO];
     } else {
         assert(_delegateDispatchQueue);
         dispatch_async(_delegateDispatchQueue, block);
     }
+}
+
+- (void)_performDelegateBlockNow:(dispatch_block_t)block;
+{
+    block();
 }
 
 - (void)setDelegateDispatchQueue:(dispatch_queue_t)queue;
@@ -439,6 +450,10 @@ static __strong NSData *CRLFCRLF;
     }
     
     _delegateDispatchQueue = queue;
+}
+
+- (void)setDelegateThread: (NSThread*)thread {
+    _delegateThread = thread;
 }
 
 - (BOOL)_checkHandshake:(CFHTTPMessageRef)httpMessage;
