@@ -1094,12 +1094,8 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         // Go on to next buffer:
         [_outputBufferQueue removeObjectAtIndex:0];
         _outputBufferOffset = 0;
-        if (_outputBufferQueue.count == 0 && [_delegate respondsToSelector:@selector(webSocketReadyForData:)]) {
-            [self _performDelegateBlock: ^{
-                if ([_delegate respondsToSelector: @selector(webSocketReadyForData:)]) {
-                    [_delegate webSocketReadyForData:self];
-                }
-            }];
+        if (_outputBufferQueue.count == 0) {
+            [self _sendReadyForData];
         }
     }
     
@@ -1127,6 +1123,16 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         }
         
         _selfRetain = nil;
+    }
+}
+
+- (void) _sendReadyForData {
+    if (self.readyState == SR_OPEN && [_delegate respondsToSelector:@selector(webSocketReadyForData:)]) {
+        [self _performDelegateBlock: ^{
+            if ([_delegate respondsToSelector: @selector(webSocketReadyForData:)]) {
+                [_delegate webSocketReadyForData:self];
+            }
+        }];
     }
 }
 
