@@ -57,6 +57,7 @@ extern NSString *const SRWebSocketErrorDomain;
 // You cannot set both OperationQueue and dispatch_queue.
 - (void)setDelegateOperationQueue:(NSOperationQueue*) queue;
 - (void)setDelegateDispatchQueue:(dispatch_queue_t) queue;
+- (void)setDelegateThread: (NSThread*)thread;
 
 // By default, it will schedule itself on +[NSRunLoop SR_networkRunLoop] using defaultModes.
 - (void)scheduleInRunLoop:(NSRunLoop *)aRunLoop forMode:(NSString *)mode;
@@ -86,6 +87,8 @@ extern NSString *const SRWebSocketErrorDomain;
 - (void)webSocketDidOpen:(SRWebSocket *)webSocket;
 - (void)webSocket:(SRWebSocket *)webSocket didFailWithError:(NSError *)error;
 - (void)webSocket:(SRWebSocket *)webSocket didCloseWithCode:(NSInteger)code reason:(NSString *)reason wasClean:(BOOL)wasClean;
+
+- (void) webSocketReadyForData:(SRWebSocket *)webSocket;
 
 @end
 

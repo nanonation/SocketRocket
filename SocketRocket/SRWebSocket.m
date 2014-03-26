@@ -232,6 +232,7 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
     
     NSOperationQueue *_delegateOperationQueue;
     dispatch_queue_t _delegateDispatchQueue;
+    NSThread* _delegateThread;
     
     dispatch_queue_t _workQueue;
     NSMutableArray *_consumers;
@@ -241,8 +242,8 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
    
     NSMutableData *_readBuffer;
     NSUInteger _readBufferOffset;
- 
-    NSMutableData *_outputBuffer;
+
+    NSMutableArray *_outputBufferQueue;
     NSUInteger _outputBufferOffset;
 
     uint8_t _currentFrameOpcode;
@@ -352,7 +353,7 @@ static __strong NSData *CRLFCRLF;
     sr_dispatch_retain(_delegateDispatchQueue);
     
     _readBuffer = [[NSMutableData alloc] init];
-    _outputBuffer = [[NSMutableData alloc] init];
+    _outputBufferQueue = [[NSMutableArray alloc] init];
     
     _currentFrameData = [[NSMutableData alloc] init];
 
@@ -421,10 +422,20 @@ static __strong NSData *CRLFCRLF;
 {
     if (_delegateOperationQueue) {
         [_delegateOperationQueue addOperationWithBlock:block];
+    } else if (_delegateThread) {
+        [self performSelector: @selector(_performDelegateBlockNow:)
+                     onThread: _delegateThread
+                   withObject: block
+                waitUntilDone: NO];
     } else {
         assert(_delegateDispatchQueue);
         dispatch_async(_delegateDispatchQueue, block);
     }
+}
+
+- (void)_performDelegateBlockNow:(dispatch_block_t)block;
+{
+    block();
 }
 
 - (void)setDelegateDispatchQueue:(dispatch_queue_t)queue;
@@ -438,6 +449,10 @@ static __strong NSData *CRLFCRLF;
     }
     
     _delegateDispatchQueue = queue;
+}
+
+- (void)setDelegateThread: (NSThread*)thread {
+    _delegateThread = thread;
 }
 
 - (BOOL)_checkHandshake:(CFHTTPMessageRef)httpMessage;
@@ -709,24 +724,18 @@ static __strong NSData *CRLFCRLF;
     if (_closeWhenFinishedWriting) {
             return;
     }
-    [_outputBuffer appendData:data];
+    [_outputBufferQueue addObject:data];
     [self _pumpWriting];
 }
+
 - (void)send:(id)data;
 {
     NSAssert(self.readyState != SR_CONNECTING, @"Invalid State: Cannot call send: until connection is open");
     // TODO: maybe not copy this for performance
     data = [data copy];
     dispatch_async(_workQueue, ^{
-        if ([data isKindOfClass:[NSString class]]) {
-            [self _sendFrameWithOpcode:SROpCodeTextFrame data:[(NSString *)data dataUsingEncoding:NSUTF8StringEncoding]];
-        } else if ([data isKindOfClass:[NSData class]]) {
-            [self _sendFrameWithOpcode:SROpCodeBinaryFrame data:data];
-        } else if (data == nil) {
-            [self _sendFrameWithOpcode:SROpCodeTextFrame data:data];
-        } else {
-            assert(NO);
-        }
+        SROpCode opcode = [data isKindOfClass:[NSData class]] ? SROpCodeBinaryFrame : SROpCodeTextFrame;
+        [self _sendFrameWithOpcode:opcode data:data];
     });
 }
 
@@ -1065,25 +1074,32 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 - (void)_pumpWriting;
 {
     [self assertOnWorkQueue];
-    
-    NSUInteger dataLength = _outputBuffer.length;
-    if (dataLength - _outputBufferOffset > 0 && _outputStream.hasSpaceAvailable) {
-        NSInteger bytesWritten = [_outputStream write:_outputBuffer.bytes + _outputBufferOffset maxLength:dataLength - _outputBufferOffset];
+
+    while (_outputBufferQueue.count > 0 && _outputStream.hasSpaceAvailable) {
+        NSData* outputBuffer = _outputBufferQueue[0];
+        NSUInteger dataLength = outputBuffer.length;
+        NSInteger bytesWritten = [_outputStream write:outputBuffer.bytes + _outputBufferOffset maxLength:dataLength - _outputBufferOffset];
         if (bytesWritten == -1) {
             [self _failWithError:[NSError errorWithDomain:@"org.lolrus.SocketRocket" code:2145 userInfo:[NSDictionary dictionaryWithObject:@"Error writing to stream" forKey:NSLocalizedDescriptionKey]]];
              return;
         }
         
         _outputBufferOffset += bytesWritten;
+        if (_outputBufferOffset < dataLength) {
+            // Not room enough for all of current buffer, so done writing
+            break;
+        }
         
-        if (_outputBufferOffset > 4096 && _outputBufferOffset > (_outputBuffer.length >> 1)) {
-            _outputBuffer = [[NSMutableData alloc] initWithBytes:(char *)_outputBuffer.bytes + _outputBufferOffset length:_outputBuffer.length - _outputBufferOffset];
-            _outputBufferOffset = 0;
+        // Go on to next buffer:
+        [_outputBufferQueue removeObjectAtIndex:0];
+        _outputBufferOffset = 0;
+        if (_outputBufferQueue.count == 0) {
+            [self _sendReadyForData];
         }
     }
     
     if (_closeWhenFinishedWriting && 
-        _outputBuffer.length - _outputBufferOffset == 0 && 
+        _outputBufferQueue.count == 0 &&
         (_inputStream.streamStatus != NSStreamStatusNotOpen &&
          _inputStream.streamStatus != NSStreamStatusClosed) &&
         !_sentClose) {
@@ -1106,6 +1122,16 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         }
         
         _selfRetain = nil;
+    }
+}
+
+- (void) _sendReadyForData {
+    if (self.readyState == SR_OPEN && [_delegate respondsToSelector:@selector(webSocketReadyForData:)]) {
+        [self _performDelegateBlock: ^{
+            if ([_delegate respondsToSelector: @selector(webSocketReadyForData:)]) {
+                [_delegate webSocketReadyForData:self];
+            }
+        }];
     }
 }
 
@@ -1296,11 +1322,19 @@ static const size_t SRFrameHeaderOverhead = 32;
 - (void)_sendFrameWithOpcode:(SROpCode)opcode data:(id)data;
 {
     [self assertOnWorkQueue];
-    
-    NSAssert(data == nil || [data isKindOfClass:[NSData class]] || [data isKindOfClass:[NSString class]], @"Function expects nil, NSString or NSData");
-    
-    size_t payloadLength = [data isKindOfClass:[NSString class]] ? [(NSString *)data lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : [data length];
-        
+
+    size_t payloadLength = 0;
+    const uint8_t *unmasked_payload = NULL;
+    if ([data isKindOfClass: [NSData class]]) {
+        payloadLength = [data length];
+        unmasked_payload = [data bytes];
+    } else if ([data isKindOfClass: [NSString class]]) {
+        payloadLength = [(NSString *)data lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        unmasked_payload =  (const uint8_t *)[data UTF8String];
+    } else {
+        NSAssert(data == nil, @"SRWebSocket expects nil, NSString or NSData");
+    }
+                
     NSMutableData *frame = [[NSMutableData alloc] initWithLength:payloadLength + SRFrameHeaderOverhead];
     if (!frame) {
         [self closeWithCode:SRStatusCodeMessageTooBig reason:@"Message too big"];
@@ -1322,15 +1356,6 @@ static const size_t SRFrameHeaderOverhead = 32;
     }
     
     size_t frame_buffer_size = 2;
-    
-    const uint8_t *unmasked_payload = NULL;
-    if ([data isKindOfClass:[NSData class]]) {
-        unmasked_payload = (uint8_t *)[data bytes];
-    } else if ([data isKindOfClass:[NSString class]]) {
-        unmasked_payload =  (const uint8_t *)[data UTF8String];
-    } else {
-        assert(NO);
-    }
     
     if (payloadLength < 126) {
         frame_buffer[1] |= payloadLength;
