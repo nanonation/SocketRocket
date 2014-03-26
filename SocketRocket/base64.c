@@ -44,7 +44,6 @@
 
 /* OPENBSD ORIGINAL: lib/libc/net/base64.c */
 
-
 #if (!defined(HAVE_B64_NTOP) && !defined(HAVE___B64_NTOP)) || (!defined(HAVE_B64_PTON) && !defined(HAVE___B64_PTON))
 
 #include <sys/types.h>
@@ -177,10 +176,13 @@ b64_ntop(u_char const *src, size_t srclength, char *target, size_t targsize)
 			target[datalength++] = Base64[output[2]];
 		target[datalength++] = Pad64;
 	}
-	if (datalength >= targsize)
+    /* Truncating datalength from size_t to int could result in a
+     return value that's useless to the caller (e.g. reading half a file)
+     */
+	if (datalength >= targsize || datalength > INT_MAX)
 		return (-1);
 	target[datalength] = '\0';	/* Returned value doesn't count \0. */
-	return (datalength);
+	return ((int)datalength);
 }
 #endif /* !defined(HAVE_B64_NTOP) && !defined(HAVE___B64_NTOP) */
 
