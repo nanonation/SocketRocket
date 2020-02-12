@@ -515,12 +515,16 @@ static __strong NSData *CRLFCRLF;
     if (_receivedHTTPHeaders == NULL) {
         _receivedHTTPHeaders = CFHTTPMessageCreateEmpty(NULL, NO);
     }
-                        
+    
+    __weak SRWebSocket* weakSelf = self;
     [self _readUntilHeaderCompleteWithCallback:^(SRWebSocket *self,  NSData *data) {
-        CFHTTPMessageAppendBytes(_receivedHTTPHeaders, (const UInt8 *)data.bytes, data.length);
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
+        CFHTTPMessageAppendBytes(strongSelf->_receivedHTTPHeaders, (const UInt8 *)data.bytes, data.length);
         
-        if (CFHTTPMessageIsHeaderComplete(_receivedHTTPHeaders)) {
-            SRFastLog(@"Finished reading headers %@", CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(_receivedHTTPHeaders)));
+        if (CFHTTPMessageIsHeaderComplete(strongSelf->_receivedHTTPHeaders)) {
+            SRFastLog(@"Finished reading headers %@", CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(strongSelf->_receivedHTTPHeaders)));
             [self _HTTPHeadersDidFinish];
         } else {
             [self _readHTTPHeader];
@@ -689,31 +693,42 @@ static __strong NSData *CRLFCRLF;
 - (void)_closeWithProtocolError:(NSString *)message;
 {
     // Need to shunt this on the _callbackQueue first to see if they received any messages 
+    __weak SRWebSocket* weakSelf = self;
     [self _performDelegateBlock:^{
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
         [self closeWithCode:SRStatusCodeProtocolError reason:message];
-        dispatch_async(_workQueue, ^{
-            [self _disconnect];
+        dispatch_async(strongSelf->_workQueue, ^{
+            SRWebSocket* strongerSelf = weakSelf;
+            if (strongerSelf == NULL)
+                return;
+            [strongerSelf _disconnect];
         });
     }];
 }
 
 - (void)_failWithError:(NSError *)error;
 {
+    __weak SRWebSocket* weakSelf = self;
     dispatch_async(_workQueue, ^{
-        if (self.readyState != SR_CLOSED) {
-            _failed = YES;
-            [self _performDelegateBlock:^{
-                if ([self.delegate respondsToSelector:@selector(webSocket:didFailWithError:)]) {
-                    [self.delegate webSocket:self didFailWithError:error];
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
+        if (strongSelf.readyState != SR_CLOSED) {
+            strongSelf->_failed = YES;
+            [strongSelf _performDelegateBlock:^{
+                if ([strongSelf.delegate respondsToSelector:@selector(webSocket:didFailWithError:)]) {
+                    [strongSelf.delegate webSocket:strongSelf didFailWithError:error];
                 }
             }];
 
-            self.readyState = SR_CLOSED;
-            _selfRetain = nil;
+            strongSelf.readyState = SR_CLOSED;
+            strongSelf->_selfRetain = nil;
 
             SRFastLog(@"Failing with error %@", error.localizedDescription);
             
-            [self _disconnect];
+            [strongSelf _disconnect];
         }
     });
 }
@@ -743,9 +758,16 @@ static __strong NSData *CRLFCRLF;
 - (void)handlePing:(NSData *)pingData;
 {
     // Need to pingpong this off _callbackQueue first to make sure messages happen in order
+    __weak SRWebSocket* weakSelf = self;
     [self _performDelegateBlock:^{
-        dispatch_async(_workQueue, ^{
-            [self _sendFrameWithOpcode:SROpCodePong data:pingData];
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
+        dispatch_async(strongSelf->_workQueue, ^{
+            SRWebSocket* strongerSelf = weakSelf;
+            if (strongerSelf == NULL)
+                return;
+            [strongerSelf _sendFrameWithOpcode:SROpCodePong data:pingData];
         });
     }];
 }
@@ -978,14 +1000,18 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 {
     assert((_currentFrameCount == 0 && _currentFrameOpcode == 0) || (_currentFrameCount > 0 && _currentFrameOpcode > 0));
 
+    __weak SRWebSocket* weakSelf = self;
     [self _addConsumerWithDataLength:2 callback:^(SRWebSocket *self, NSData *data) {
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
         __block frame_header header = {0};
         
         const uint8_t *headerBuffer = data.bytes;
         assert(data.length >= 2);
         
         if (headerBuffer[0] & SRRsvMask) {
-            [self _closeWithProtocolError:@"Server used RSV bits"];
+            [strongSelf _closeWithProtocolError:@"Server used RSV bits"];
             return;
         }
         
@@ -993,17 +1019,17 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         
         BOOL isControlFrame = (receivedOpcode == SROpCodePing || receivedOpcode == SROpCodePong || receivedOpcode == SROpCodeConnectionClose);
         
-        if (!isControlFrame && receivedOpcode != 0 && self->_currentFrameCount > 0) {
-            [self _closeWithProtocolError:@"all data frames after the initial data frame must have opcode 0"];
+        if (!isControlFrame && receivedOpcode != 0 && strongSelf->_currentFrameCount > 0) {
+            [strongSelf _closeWithProtocolError:@"all data frames after the initial data frame must have opcode 0"];
             return;
         }
         
-        if (receivedOpcode == 0 && self->_currentFrameCount == 0) {
-            [self _closeWithProtocolError:@"cannot continue a message"];
+        if (receivedOpcode == 0 && strongSelf->_currentFrameCount == 0) {
+            [strongSelf _closeWithProtocolError:@"cannot continue a message"];
             return;
         }
         
-        header.opcode = receivedOpcode == 0 ? self->_currentFrameOpcode : receivedOpcode;
+        header.opcode = receivedOpcode == 0 ? strongSelf->_currentFrameOpcode : receivedOpcode;
         
         header.fin = !!(SRFinMask & headerBuffer[0]);
         
@@ -1014,10 +1040,10 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         headerBuffer = NULL;
         
         if (header.masked) {
-            [self _closeWithProtocolError:@"Client must receive unmasked data"];
+            [strongSelf _closeWithProtocolError:@"Client must receive unmasked data"];
         }
         
-        size_t extra_bytes_needed = header.masked ? sizeof(_currentReadMaskKey) : 0;
+        size_t extra_bytes_needed = header.masked ? sizeof(strongSelf->_currentReadMaskKey) : 0;
         
         if (header.payload_length == 126) {
             extra_bytes_needed += sizeof(uint16_t);
@@ -1026,9 +1052,12 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         }
         
         if (extra_bytes_needed == 0) {
-            [self _handleFrameHeader:header curData:self->_currentFrameData];
+            [strongSelf _handleFrameHeader:header curData:strongSelf->_currentFrameData];
         } else {
-            [self _addConsumerWithDataLength:extra_bytes_needed callback:^(SRWebSocket *self, NSData *data) {
+            [strongSelf _addConsumerWithDataLength:extra_bytes_needed callback:^(SRWebSocket *selfParam, NSData *data) {
+                SRWebSocket* strongerSelf = weakSelf;
+                if (strongerSelf == NULL)
+                    return;
                 size_t mapped_size = data.length;
                 const void *mapped_buffer = data.bytes;
                 size_t offset = 0;
@@ -1048,11 +1077,11 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
                 
                 
                 if (header.masked) {
-                    assert(mapped_size >= sizeof(_currentReadMaskOffset) + offset);
-                    memcpy(self->_currentReadMaskKey, ((uint8_t *)mapped_buffer) + offset, sizeof(self->_currentReadMaskKey));
+                    assert(mapped_size >= sizeof(strongerSelf->_currentReadMaskOffset) + offset);
+                    memcpy(strongerSelf->_currentReadMaskKey, ((uint8_t *)mapped_buffer) + offset, sizeof(strongerSelf->_currentReadMaskKey));
                 }
                 
-                [self _handleFrameHeader:header curData:self->_currentFrameData];
+                [strongerSelf _handleFrameHeader:header curData:strongerSelf->_currentFrameData];
             } readToCurrentFrame:NO unmaskBytes:NO];
         }
     } readToCurrentFrame:NO unmaskBytes:NO];
@@ -1060,15 +1089,19 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 
 - (void)_readFrameNew;
 {
+    __weak SRWebSocket* weakSelf = self;
     dispatch_async(_workQueue, ^{
-        [_currentFrameData setLength:0];
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
+        [strongSelf->_currentFrameData setLength:0];
         
-        _currentFrameOpcode = 0;
-        _currentFrameCount = 0;
-        _readOpCount = 0;
-        _currentStringScanPosition = 0;
+        strongSelf->_currentFrameOpcode = 0;
+        strongSelf->_currentFrameCount = 0;
+        strongSelf->_readOpCount = 0;
+        strongSelf->_currentStringScanPosition = 0;
         
-        [self _readFrameContinue];
+        [strongSelf _readFrameContinue];
     });
 }
 
@@ -1115,9 +1148,13 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         }
         
         if (!_failed) {
-            [self _performDelegateBlock:^{
-                if ([self.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
-                    [self.delegate webSocket:self didCloseWithCode:_closeCode reason:_closeReason wasClean:YES];
+            __weak SRWebSocket* weakSelf = self;
+            [self _performDelegateBlock: ^{
+                SRWebSocket* strongSelf = weakSelf;
+                if (strongSelf == NULL)
+                    return;
+                if ([strongSelf.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
+                    [strongSelf.delegate webSocket:strongSelf didCloseWithCode:strongSelf->_closeCode reason:strongSelf->_closeReason wasClean:YES];
                 }
             }];
         }
@@ -1128,9 +1165,13 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 
 - (void) _sendReadyForData {
     if (self.readyState == SR_OPEN && [_delegate respondsToSelector:@selector(webSocketReadyForData:)]) {
+        __weak SRWebSocket* weakSelf = self;
         [self _performDelegateBlock: ^{
-            if ([_delegate respondsToSelector: @selector(webSocketReadyForData:)]) {
-                [_delegate webSocketReadyForData:self];
+            SRWebSocket* strongSelf = weakSelf;
+            if (strongSelf == NULL)
+                return;
+            if ([strongSelf->_delegate respondsToSelector: @selector(webSocketReadyForData:)]) {
+                [strongSelf->_delegate webSocketReadyForData:strongSelf];
             }
         }];
     }
@@ -1428,50 +1469,54 @@ static const size_t SRFrameHeaderOverhead = 32;
         }
     }
 
+    __weak SRWebSocket* weakSelf = self;
     dispatch_async(_workQueue, ^{
+        SRWebSocket* strongSelf = weakSelf;
+        if (strongSelf == NULL)
+            return;
         switch (eventCode) {
             case NSStreamEventOpenCompleted: {
                 SRFastLog(@"NSStreamEventOpenCompleted %@", aStream);
-                if (self.readyState >= SR_CLOSING) {
+                if (strongSelf.readyState >= SR_CLOSING) {
                     return;
                 }
-                assert(_readBuffer);
+                assert(strongSelf->_readBuffer);
                 
-                if (self.readyState == SR_CONNECTING && aStream == _inputStream) {
-                    [self didConnect];
+                if (strongSelf.readyState == SR_CONNECTING && aStream == strongSelf->_inputStream) {
+                    [strongSelf didConnect];
                 }
-                [self _pumpWriting];
-                [self _pumpScanner];
+                [strongSelf _pumpWriting];
+                [strongSelf _pumpScanner];
                 break;
             }
                 
             case NSStreamEventErrorOccurred: {
                 SRFastLog(@"NSStreamEventErrorOccurred %@ %@", aStream, [[aStream streamError] copy]);
                 /// TODO specify error better!
-                [self _failWithError:aStream.streamError];
-                _readBufferOffset = 0;
-                [_readBuffer setLength:0];
+                [strongSelf _failWithError:aStream.streamError];
+                strongSelf->_readBufferOffset = 0;
+                [strongSelf->_readBuffer setLength:0];
                 break;
                 
             }
                 
             case NSStreamEventEndEncountered: {
-                [self _pumpScanner];
+                [strongSelf _pumpScanner];
                 SRFastLog(@"NSStreamEventEndEncountered %@", aStream);
                 if (aStream.streamError) {
-                    [self _failWithError:aStream.streamError];
+                    [strongSelf _failWithError:aStream.streamError];
                 } else {
-                    if (self.readyState != SR_CLOSED) {
-                        self.readyState = SR_CLOSED;
-                        _selfRetain = nil;
+                    if (strongSelf.readyState != SR_CLOSED) {
+                        strongSelf.readyState = SR_CLOSED;
+                        strongSelf->_selfRetain = nil;
                     }
 
-                    if (!_sentClose && !_failed) {
-                        _sentClose = YES;
+                    if (!strongSelf->_sentClose && !strongSelf->_failed) {
+                        strongSelf->_sentClose = YES;
                         // If we get closed in this state it's probably not clean because we should be sending this when we send messages
-                        [self _performDelegateBlock:^{
-                            if ([self.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
-                                [self.delegate webSocket:self didCloseWithCode:0 reason:@"Stream end encountered" wasClean:NO];
+                        [strongSelf _performDelegateBlock:^{
+                            if ([strongSelf.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
+                                [strongSelf.delegate webSocket:strongSelf didCloseWithCode:0 reason:@"Stream end encountered" wasClean:NO];
                             }
                         }];
                     }
@@ -1485,26 +1530,26 @@ static const size_t SRFrameHeaderOverhead = 32;
                 const int bufferSize = 2048;
                 uint8_t buffer[bufferSize];
                 
-                while (_inputStream.hasBytesAvailable) {
-                    NSInteger bytes_read = [_inputStream read:buffer maxLength:bufferSize];
+                while (strongSelf->_inputStream.hasBytesAvailable) {
+                    NSInteger bytes_read = [strongSelf->_inputStream read:buffer maxLength:bufferSize];
                     
                     if (bytes_read > 0) {
-                        [_readBuffer appendBytes:buffer length:bytes_read];
+                        [strongSelf->_readBuffer appendBytes:buffer length:bytes_read];
                     } else if (bytes_read < 0) {
-                        [self _failWithError:_inputStream.streamError];
+                        [strongSelf _failWithError:strongSelf->_inputStream.streamError];
                     }
                     
                     if (bytes_read != bufferSize) {
                         break;
                     }
                 };
-                [self _pumpScanner];
+                [strongSelf _pumpScanner];
                 break;
             }
                 
             case NSStreamEventHasSpaceAvailable: {
                 SRFastLog(@"NSStreamEventHasSpaceAvailable %@", aStream);
-                [self _pumpWriting];
+                [strongSelf _pumpWriting];
                 break;
             }
                 
